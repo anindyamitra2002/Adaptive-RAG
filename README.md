@@ -24,7 +24,7 @@ This model leverages several innovative techniques to enhance performance and re
 <p align="center">
   <img src="./Adaptive RAG.png" alt="Diagram of adaptive rag" />
 </p>
----
+
 
 ## Prerequisites
 
