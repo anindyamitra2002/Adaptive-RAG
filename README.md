@@ -21,7 +21,9 @@
 The **Adaptive Retrieval-Augmented Generation (RAG)** model is an advanced tool designed to assist in querying large sets of documents and generating human-like responses based on the retrieved information. This system utilizes cutting-edge technologies such as **Pinecone** for fast vector-based document retrieval and **OpenAI** for language generation. The Adaptive RAG model is built to support real-time queries from users, provide highly relevant information from large document collections, and generate detailed answers, making it ideal for applications like chat assistants, knowledge bases, and automated support systems.
 
 This model leverages several innovative techniques to enhance performance and retrieval accuracy, including **advanced document parsing**, **semantic chunking**, and **multilingual embeddings**. These optimizations make it robust in handling diverse document formats, improving the quality of information retrieval, and ensuring that the generated answers are contextually accurate.
-
+<p align="center">
+  <img src="./Adaptive RAG.png" alt="Diagram of adaptive rag" />
+</p>
 ---
 
 ## Prerequisites
