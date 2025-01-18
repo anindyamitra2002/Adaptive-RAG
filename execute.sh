@@ -11,4 +11,4 @@ export PYTHONPATH=.
 # Install and run Ollama
 curl -fsSL https://ollama.com/install.sh | sh
 sleep 1
-ollama run llama3.2
+ollama run mistral

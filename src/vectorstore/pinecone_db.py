@@ -1,5 +1,5 @@
-from data_processing.loader import MultiFormatDocumentLoader
-from data_processing.chunker import SDPMChunker, BGEM3Embeddings
+from src.data_processing.loader import MultiFormatDocumentLoader
+from src.data_processing.chunker import SDPMChunker, BGEM3Embeddings
 
 import pandas as pd
 from typing import List, Dict, Any
@@ -8,7 +8,18 @@ import time
 from tqdm import tqdm
 from dotenv import load_dotenv
 import os
+import logging
+from typing import Dict, List, Any
+import time
+from chonkie import RecursiveChunker, RecursiveRules
 
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger('rag_chunking')
 
 load_dotenv()
 
@@ -41,36 +52,90 @@ def load_documents(file_paths: List[str], output_path='./data/output.md'):
     
     return output_path
 
-def process_chunks(markdown_path: str, chunk_size: int = 256, 
-                  threshold: float = 0.7, skip_window: int = 2):
+def process_chunks(
+    markdown_path: str, 
+    chunk_size: int = 512,
+    threshold: float = 0.7, 
+    skip_window: int = 2,
+    large_doc_threshold: int = 100000  # 100KB threshold for large documents
+):
     """
-    Process the markdown file into chunks and prepare for vector storage
+    Process the markdown file into chunks and prepare for vector storage.
+    Uses different chunking strategies based on document size.
+    
+    Args:
+        markdown_path (str): Path to the markdown file
+        chunk_size (int): Size of chunks
+        threshold (float): Similarity threshold for SDPM chunker
+        skip_window (int): Skip window size for SDPM chunker
+        large_doc_threshold (int): Threshold in bytes to determine large documents
+        
+    Returns:
+        List[Dict[str, Any]]: List of processed chunks with metadata
     """
-    chunker = SDPMChunker(
-        embedding_model=embedding_model,
-        chunk_size=chunk_size,
-        threshold=threshold,
-        skip_window=skip_window
-    )
+    start_time = time.time()
+    logger.info(f"Starting document processing: {markdown_path}")
     
     # Read the markdown file
-    with open(markdown_path, 'r') as file:
-        text = file.read()
+    try:
+        with open(markdown_path, 'r') as file:
+            text = file.read()
+    except Exception as e:
+        logger.error(f"Error reading file {markdown_path}: {str(e)}")
+        raise
     
-    # Generate chunks
-    chunks = chunker.chunk(text)
+    doc_length = len(text)
+    logger.info(f"Document length: {doc_length} characters")
     
-    # Prepare data for Parquet
+    # Choose chunking strategy based on document size
+    if doc_length > large_doc_threshold:
+        logger.info("Using RecursiveChunker for large document")
+        chunker = RecursiveChunker(
+            tokenizer="gpt2",
+            chunk_size=chunk_size,
+            rules=RecursiveRules(),
+            min_characters_per_chunk=12,
+        )
+        chunks = chunker.chunk(text)
+        chunker_type = "recursive"
+    else:
+        logger.info("Using SDPM Chunker for standard document")
+        chunker = SDPMChunker(
+            embedding_model=embedding_model,
+            chunk_size=chunk_size,
+            threshold=threshold,
+            skip_window=skip_window
+        )
+        chunks = chunker.chunk(text)
+        chunker_type = "sdpm"
+    
+    # Process chunks and collect metadata
     processed_chunks = []
-    for chunk in chunks:
-        
-        processed_chunks.append({
-            'text': chunk.text,
-            'token_count': chunk.token_count,
-            'start_index': chunk.start_index,
-            'end_index': chunk.end_index,
-            'num_sentences': len(chunk.sentences),
-        })
+    for i, chunk in enumerate(chunks):
+        try:
+            chunk_data = {
+                'text': chunk.text,
+                'token_count': chunk.token_count,
+                'start_index': chunk.start_index,
+                'end_index': chunk.end_index
+            }
+            processed_chunks.append(chunk_data)
+            
+        except Exception as e:
+            logger.error(f"Error processing chunk {i}: {str(e)}")
+            continue
+    
+    # Log processing summary
+    end_time = time.time()
+    processing_time = end_time - start_time
+    
+    logger.info(
+        f"Chunking completed:\n"
+        f"- Processing time: {processing_time:.2f} seconds\n"
+        f"- Chunker used: {chunker_type}\n"
+        f"- Total chunks created: {len(processed_chunks)}\n"
+        f"- Average chunk size: {sum(len(c['text']) for c in processed_chunks) / len(processed_chunks):.2f} characters"
+    )
     
     return processed_chunks
 
@@ -143,7 +208,8 @@ def ingest_data(
     pinecone_client: Pinecone,
     index_name= "vector-index",
     namespace= "rag",
-    batch_size: int = 100
+    batch_size: int = 256,
+    progress_callback=None
 ):
     """Ingest data from a Parquet file into Pinecone.
     
@@ -176,9 +242,9 @@ def ingest_data(
             time.sleep(1)
     
     index = pinecone_client.Index(index_name)
-    
+    total_rows = len(df)
     # Process in batches
-    for i in tqdm(range(0, len(df), batch_size)):
+    for i in tqdm(range(0, total_rows, batch_size)):
         batch_df = df.iloc[i:i+batch_size]
         
         # Generate embeddings for batch
@@ -196,7 +262,8 @@ def ingest_data(
         
         # Upsert to Pinecone
         index.upsert(vectors=records, namespace=namespace)
-        
+        if progress_callback:
+            progress_callback(min(i + batch_size, total_rows), total_rows)
         # Small delay to handle rate limits
         time.sleep(0.5)
 

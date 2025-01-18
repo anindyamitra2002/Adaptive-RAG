@@ -16,6 +16,6 @@ crawl4ai
 docling
 easyocr
 FlagEmbedding
-chonkie[semantic]
+chonkie
 pinecone
 streamlit

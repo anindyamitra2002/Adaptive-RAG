@@ -1,17 +1,17 @@
 from langgraph.graph import END, StateGraph, START
 from langchain_core.prompts import PromptTemplate
-from agents.state import GraphState
-# from agents.router import route_query
+from src.agents.state import GraphState
+# from src.agents.router import route_query
 import asyncio
-from vectorstore.pinecone_db import get_retriever
-from tools.web_search import AdvancedWebCrawler
-from llm.graders import (
+from src.vectorstore.pinecone_db import get_retriever
+from src.tools.web_search import AdvancedWebCrawler
+from src.llm.graders import (
     grade_document_relevance, 
     check_hallucination, 
     grade_answer_quality
 )
 from langchain_core.output_parsers import StrOutputParser
-from llm.query_rewriter import rewrite_query
+from src.llm.query_rewriter import rewrite_query
 from langchain_ollama import ChatOllama
 
 def perform_web_search(question: str):
@@ -86,6 +86,25 @@ def create_adaptive_rag_workflow(retriever, llm, top_k=5, enable_websearch=False
         generation = rag_chain.invoke({"context": context, "question": question})
         
         return {"generation": generation, "documents": documents, "question": question}
+    
+    def generate_answer_from_web(state: GraphState):
+        """Generate answer using retrieved documents."""
+        print("---GENERATE---")
+        question = state['question']
+        documents = state['documents']
+        
+        # Prepare context
+        context = "\n\n".join([doc["page_content"] for doc in documents])
+        prompt_template = PromptTemplate.from_template("""You are an assistant for question-answering tasks. Use the following pieces of retrieved context to answer the question. If you don't know the answer, just say that you don't know. Use three sentences maximum and keep the answer concise.
+        Question: {question}
+        Context: {context}
+        Answer:""")
+        # Generate answer
+        rag_chain = prompt_template | llm | StrOutputParser()
+
+        generation = rag_chain.invoke({"context": context, "question": question})
+        
+        return {"generation": generation, "documents": documents, "question": question}
 
     def grade_documents(state: GraphState):
         """Filter relevant documents."""
@@ -125,8 +144,6 @@ def create_adaptive_rag_workflow(retriever, llm, top_k=5, enable_websearch=False
         documents = state['documents']
         generation = state['generation']
  
-        
-        print("---Generation is not hallucinated.---")
         # Check answer quality
         quality_score = grade_answer_quality(question, generation, llm)
         if quality_score == "yes":
@@ -143,6 +160,7 @@ def create_adaptive_rag_workflow(retriever, llm, top_k=5, enable_websearch=False
     workflow.add_node("web_search", web_search)
     workflow.add_node("grade_documents", grade_documents)
     workflow.add_node("generate", generate_answer)
+    workflow.add_node("generate_answer_from_web", generate_answer_from_web)
     workflow.add_node("rewrite_query", lambda state: {
         "question": rewrite_query(state['question'], llm),
         "documents": [],
@@ -159,7 +177,8 @@ def create_adaptive_rag_workflow(retriever, llm, top_k=5, enable_websearch=False
         }
     )
     
-    workflow.add_edge("web_search", "generate")
+    workflow.add_edge("web_search", "generate_answer_from_web")
+    workflow.add_edge("generate_answer_from_web", END)
     workflow.add_edge("vectorstore", "grade_documents")
     
     workflow.add_conditional_edges(

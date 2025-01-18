@@ -3,6 +3,7 @@ from src.vectorstore.pinecone_db import ingest_data, get_retriever, load_documen
 from pinecone import Pinecone
 from langchain_openai import ChatOpenAI
 from langchain_ollama import ChatOllama
+from langchain_groq import ChatGroq
 from src.agents.workflow import run_adaptive_rag
 from langgraph.pregel import GraphRecursionError
 import tempfile
@@ -31,13 +32,15 @@ def initialize_pinecone(api_key):
         st.error(f"Error initializing Pinecone: {str(e)}")
         return None
 
-def initialize_llm(llm_option, openai_api_key=None):
+def initialize_llm(llm_option, api_key=None):
     """Initialize LLM based on user selection."""
     if llm_option == "OpenAI":
-        if not openai_api_key:
+        if not api_key:
             st.sidebar.warning("Please enter OpenAI API key.")
             return None
-        return ChatOpenAI(api_key=openai_api_key, model="gpt-3.5-turbo")
+        return ChatOpenAI(api_key=api_key, model="gpt-3.5-turbo")
+    elif llm_option == "Grok":
+        return ChatGroq(model="mixtral-8x7b-32768",api_key=api_key, temperature=0.2, max_tokens=512, max_retries=2)
     else:
         return ChatOllama(model="llama3.2", temperature=0.3, num_predict=512, top_p=0.6)
 
@@ -52,54 +55,117 @@ def clear_pinecone_index(pc, index_name="vector-index"):
         st.error(f"Error clearing database: {str(e)}")
 
 def process_documents(uploaded_files, pc):
-    """Process uploaded documents and store in Pinecone."""
+    """
+    Process uploaded documents and store in Pinecone with detailed progress tracking.
+    
+    Args:
+        uploaded_files: List of uploaded files from Streamlit
+        pc: Pinecone client instance
+        
+    Returns:
+        bool: True if processing successful, False otherwise
+    """
     if not uploaded_files:
         st.warning("Please upload at least one document.")
         return False
 
-    with st.spinner("Processing documents..."):
+    try:
         temp_dir = tempfile.mkdtemp()
         file_paths = []
         markdown_path = Path(temp_dir) / "combined.md"
         parquet_path = Path(temp_dir) / "documents.parquet"
-        
-        for uploaded_file in uploaded_files:
-            file_path = Path(temp_dir) / uploaded_file.name
-            with open(file_path, "wb") as f:
-                f.write(uploaded_file.getvalue())
-            file_paths.append(str(file_path))
 
-        try:
+        with st.status("Processing Documents", expanded=True) as status:
+            # File saving phase
+            st.write("📁 Saving uploaded files...")
+            progress_text = "Saving files..."
+            file_progress = st.progress(0, text=progress_text)
+            
+            for i, uploaded_file in enumerate(uploaded_files):
+                file_path = Path(temp_dir) / uploaded_file.name
+                with open(file_path, "wb") as f:
+                    f.write(uploaded_file.getvalue())
+                file_paths.append(str(file_path))
+                file_progress.progress((i + 1) / len(uploaded_files), 
+                                    text=f"Saving file {i+1}/{len(uploaded_files)}")
+            file_progress.empty()
+            
+            # Document loading phase
+            st.write("📚 Converting documents to markdown...")
             markdown_path = load_documents(file_paths, output_path=markdown_path)
-            chunks = process_chunks(markdown_path, chunk_size=256, threshold=0.6)
-            print(f"Processed chunks: {chunks}")
+            
+            # Chunking phase
+            st.write("✂️ Chunking documents...")
+            start_time = time.time()
+            chunks = process_chunks(markdown_path, chunk_size=512)
+            chunking_time = time.time() - start_time
+            
+            # Display metrics
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Documents", len(uploaded_files))
+            with col2:
+                st.metric("Chunks Created", len(chunks))
+            with col3:
+                st.metric("Processing Time", f"{chunking_time:.1f}s")
+            
+            # Parquet saving phase
+            st.write("💾 Saving chunks to parquet...")
             parquet_path = save_to_parquet(chunks, parquet_path)
+            
+            # Ingestion phase
+            st.write("🔄 Starting data ingestion...")
+            
+            total_chunks = len(chunks)
+            ingestion_progress = st.progress(0, text="Starting ingestion...")
+            
+            def ingestion_callback(current: int, total: int):
+                progress = min(current / total, 1.0) if total > 0 else 0
+                ingestion_progress.progress(
+                    progress,
+                    text=f"Ingesting chunks: {current}/{total}"
+                )
             
             ingest_data(
                 pc=pc,
                 parquet_path=parquet_path,
                 text_column="text",
-                pinecone_client=pc
+                pinecone_client=pc,
+                progress_callback=ingestion_callback
             )
             
+            ingestion_progress.empty()
+            
+            # Setup retriever
+            st.write("🎯 Setting up retriever...")
             st.session_state.retriever = get_retriever(pc)
             st.session_state.documents_processed = True
             
-            return True
-            
-        except Exception as e:
-            st.error(f"Error processing documents: {str(e)}")
-            return False
-        finally:
-            for file_path in file_paths:
-                try:
-                    os.remove(file_path)
-                except:
-                    pass
+            # Update status to complete
+            status.update(
+                label="Processing complete!",
+                state="complete",
+                expanded=False
+            )
+
+        st.success("🎉 Documents have been processed and indexed successfully!")
+        return True
+        
+    except Exception as e:
+        st.error(f"❌ Error processing documents: {str(e)}")
+        return False
+        
+    finally:
+        # Cleanup temporary files
+        for file_path in file_paths:
             try:
-                os.rmdir(temp_dir)
-            except:
-                pass
+                os.remove(file_path)
+            except Exception as e:
+                st.warning(f"Warning: Could not remove temporary file {file_path}: {str(e)}")
+        try:
+            os.rmdir(temp_dir)
+        except Exception as e:
+            st.warning(f"Warning: Could not remove temporary directory: {str(e)}")
 
 def run_rag_with_streaming(retriever, question, llm, enable_web_search=False):
     """Run RAG workflow and yield streaming results."""
@@ -122,8 +188,8 @@ def run_rag_with_streaming(retriever, question, llm, enable_web_search=False):
             yield word + " "
             time.sleep(0.03)
             
-    except Exception as e:
-        yield f"I encountered an error while processing your question: {str(e)}"
+    # except Exception as e:
+    #     yield f"I encountered an error while processing your question: {str(e)}"
 
 def main():
     st.title("🤖 RAG Chat Assistant")
@@ -135,10 +201,12 @@ def main():
     pinecone_api_key = st.sidebar.text_input("Enter Pinecone API Key:", type="password")
     
     # LLM Selection
-    llm_option = st.sidebar.selectbox("Select Language Model:", ["OpenAI", "Ollama"])
-    openai_api_key = None
+    llm_option = st.sidebar.selectbox("Select Language Model:", ["OpenAI", "Ollama", "Grok"])
+    api_key = None
     if llm_option == "OpenAI":
-        openai_api_key = st.sidebar.text_input("Enter OpenAI API Key:", type="password")
+        api_key = st.sidebar.text_input("Enter OpenAI API Key:", type="password")
+    elif llm_option == "Grok":
+        api_key = st.sidebar.text_input("Enter Grok API Key:", type="password")
     
     # Web search tool in sidebar
     st.sidebar.markdown("---")
@@ -154,7 +222,7 @@ def main():
         st.stop()
     
     # Initialize LLM
-    llm = initialize_llm(llm_option, openai_api_key)
+    llm = initialize_llm(llm_option, api_key)
     if llm is None:
         st.stop()
     
